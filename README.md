@@ -1,5 +1,5 @@
 # Connect-ExchangeService
-PowerShell function to connect to Exchange on-prem and Exchange Online with or without MFA.
+PowerShell function to connect to Exchange on-prem and Exchange Online with or without MFA. Thanks to Jos Verlinde for sharing his Load-ExchangeMFA script.
 
     .SYNOPSIS
         Connect to remote Exchange PowerShell session on-prem or online.
