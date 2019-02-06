@@ -55,14 +55,17 @@ function Connect-ExchangeService
         Connect-ExchangeService -EXO
 
         This will connect to Exchange Online.
+    
+    .NOTES
+        Thanks to Jos Verlinde for sharing his Load-ExchangeMFA script.
     #>
 
     [cmdletbinding(DefaultParameterSetName="EXP")]
-
+    
     param
     (
-        [Parameter(Mandatory=$false,ParameterSetName="EXP")][switch]$EXP,
-        [Parameter(Mandatory=$false,ParameterSetName="EXO")][switch]$EXO,
+        [parameter(Mandatory=$false,ParameterSetName="EXP")][switch]$EXP,
+        [parameter(Mandatory=$false,ParameterSetName="EXO")][switch]$EXO,
         [parameter(Mandatory=$false,ParameterSetName="EXP")][PSCredential]$Credential,
         [parameter(Mandatory=$false,ParameterSetName="EXP")][string]$SessionPrefix,
         [parameter(Mandatory=$false,ParameterSetName="EXP")][string]$ADSite,
@@ -120,6 +123,44 @@ function Connect-ExchangeService
         }
     }
 
+    function Disconnect-ExchangeService
+    {
+        <#
+        .SYNOPSIS
+            Disconnect Exchange PSSession.
+    
+        .DESCRIPTION
+            Disconnect Exchange PSSession.
+    
+        .PARAMETER PSSession
+            The PSSession that needs to be disconnected.
+    
+        .EXAMPLE
+            Disconnect-ExchangeService -PSSession (Get-PSSession)[0]
+    
+            This will disconnect the first PSSession found.
+        #>
+
+        param
+        (
+            [parameter(Mandatory=$true)][System.Management.Automation.Runspaces.PSSession]$PSSession
+        )
+    
+        Write-Debug -Message "Disconnecting session: $($PSSession.Name)"
+        $Module=Get-Module | Where-Object { $_.Description -like "*$($PSSession.ComputerName)*" }
+        $Module | Remove-Module
+        $PSSession | Remove-PSSession
+        Remove-Item -Path ($Module.Path -replace "(.*)\\.*","`$1") -Recurse -Confirm:$false
+        if($PSSession.ComputerName -eq "outlook.office365.com")
+        {
+            if(Get-Module -Name Microsoft.Exchange.Management.ExoPowershellModule)
+            {
+                Remove-Module -Name Microsoft.Exchange.Management.ExoPowershellModule
+            }
+        }
+        Write-Debug -Message "Session disconnected: $($PSSession.Name)"
+    }
+    
     function Install-ClickOnce
     {
         param
@@ -176,15 +217,14 @@ function Connect-ExchangeService
             } else {
                 Write-error "ClickOnce Manifest Download did not complete in time (5s)"
             }
-
-                #Clean Up 
-            }
-            finally
-            {
-                #get rid of our eventhandlers
-                Get-EventSubscriber|? {$_.SourceObject.ToString() -eq 'System.Deployment.Application.InPlaceHostingManager'} | Unregister-Event
-            }
+            #Clean Up 
         }
+        finally
+        {
+            #get rid of our eventhandlers
+            Get-EventSubscriber|? {$_.SourceObject.ToString() -eq 'System.Deployment.Application.InPlaceHostingManager'} | Unregister-Event
+        }
+    }
         
     function Get-ClickOnce
     {  
@@ -302,52 +342,79 @@ function Connect-ExchangeService
     }
 
     $PSSessions=Get-PSSession | Where-Object { ($_.ConfigurationName -eq "Microsoft.Exchange") }
-    foreach($Session in $PSSessions)
+    switch($PSCmdlet.ParameterSetName)
     {
-        switch($Session.ComputerName)
+        "EXO"
         {
-            "outlook.office365.com"
+            foreach($PSSession in $PSSessions)
             {
-                if(($PSCmdlet.ParameterSetName -eq "EXP") -and (!$SessionPrefix) -and (!$Disconnect.IsPresent))
+                if($PSSession.ComputerName -eq "outlook.office365.com")
                 {
-                    Write-Error -Message "Already connected to Exchange Online. Use of SessionPrefix is required."
-                    return
+                    Write-Debug -Message "Session to Exchange Online found."
+                    $EXOPSSession=$PSSession
                 }
-                Write-Debug -Message "Session to Exchange Online found."
-                $EXOPSSession=$Session
+                else
+                {
+                    if($Force.IsPresent)
+                    {
+                        Write-Debug -Message "Force parameter set."
+                    }
+                    elseif(!$Disconnect.IsPresent)
+                    {
+                        Write-Error -Message "Connecting to EXO is breaking the On-prem connection. Use the force parameter to force a connection."
+                        return
+                    }
+                    $EXPSSession=$PSSession
+                }
             }
-            default
+            if($Disconnect.IsPresent)
             {
-                if(($PSCmdlet.ParameterSetName -eq "EXO") -and (!$Disconnect.IsPresent) -and (!$Force.IsPresent))
+                Write-Debug -Message "Disconnect parameter set."
+                Disconnect-ExchangeService -PSSession $EXOPSSession
+                $Host.UI.RawUI.WindowTitle=$Host.UI.RawUI.WindowTitle -replace "(.*) \| EXO(.*)","`$1`$2"
+                return
+            }
+        }
+        "EXP"
+        {
+            foreach($PSSession in $PSSessions)
+            {
+                if($PSSession.ComputerName -eq "outlook.office365.com")
                 {
-                    switch($Session.Name)
+                    Write-Debug -Message "Session to Exchange Online found."
+                    if($SessionPrefix)
                     {
-                        "EXP"
-                        {
-                            Write-Error -Message "Already connected to Exchange On-prem without SessionPrefix."
-                            return
-                        }
-                        default
-                        {
-                            Write-Error -Message "Connecting to EXO is breaking the On-prem connection. Use the force parameter to force a connection."
-                            return
-                        }
+                        Write-Debug -Message "Session prefix specified: $SessionPrefix"
                     }
+                    elseif(!$Disconnect.IsPresent)
+                    {
+                        Write-Error -Message "Already connected to Exchange Online. Use of SessionPrefix is required."
+                        return
+                    }
+                    $EXOPSSession=$PSSession
                 }
-                if($PSCmdlet.ParameterSetName -eq "EXP")
+                else
                 {
-                    switch($Session.Name)
+                    if($PSSession.Name -eq "EXP")
                     {
-                        "EXP"
-                        {
-                            Write-Debug -Message "Session to Exchange on-prem found without SessionPrefix."
-                        }
-                        default
-                        {
-                            Write-Debug -Message "Session to Exchange on-prem found with SessionPrefix."
-                        }
+                        Write-Debug -Message "Session to Exchange on-prem found without SessionPrefix."
                     }
-                    $EXPPSSession=$Session
+                    elseif($PSSession.Name -like "EXP*")
+                    {
+                        Write-Debug -Message "Session to Exchange on-prem found with SessionPrefix."
+                    }
+                    else
+                    {
+                        Write-Debug -Message "Session found to Exchange on-prem, but cannot determine SessionPrefix."
+                    }
+                    $EXPPSSession=$PSSession
+                    if($Disconnect.IsPresent)
+                    {
+                        Write-Debug -Message "Disconnect parameter set."
+                        Disconnect-ExchangeService -PSSession $EXPPSSession
+                        $Host.UI.RawUI.WindowTitle=$Host.UI.RawUI.WindowTitle -replace "(.*) \| EXP(?: Sessionprefix: [A-Z]+)?(.*)","`$1`$2"
+                        return
+                    }
                 }
             }
         }
@@ -374,6 +441,7 @@ function Connect-ExchangeService
                     $Module | Remove-Module
                     $EXPPSSession | Remove-PSSession
                     Remove-Item -Path ($Module.Path -replace "(.*)\\.*","`$1") -Recurse -Confirm:$false
+                    $Host.UI.RawUI.WindowTitle=$Host.UI.RawUI.WindowTitle -replace "(.*) \| EXP(?: Sessionprefix: [A-Z]+)?(.*)","`$1`$2"
                 }
                 if($Disconnect.IsPresent)
                 {
@@ -434,6 +502,14 @@ function Connect-ExchangeService
                             }
                             Write-DebugHashTable -HashTable $ParametersImportPSSession -Header "Start: Parameters Import-PSSession" -Footer "End: Parameters Import-PSSession"
                             $out=Import-PSSession @ParametersImportPSSession 4>&1 3>&1
+                            if($SessionPrefix)
+                            {
+                                $Host.UI.RawUI.WindowTitle="$($Host.UI.RawUI.WindowTitle) | EXP Sessionprefix: $Sessionprefix"  
+                            }
+                            else
+                            {
+                                $Host.UI.RawUI.WindowTitle="$($Host.UI.RawUI.WindowTitle) | EXP"   
+                            }
                             break
                         }
                     }
@@ -471,6 +547,7 @@ function Connect-ExchangeService
                     {
                         Remove-Module -Name Microsoft.Exchange.Management.ExoPowershellModule
                     }
+                    $Host.UI.RawUI.WindowTitle=$Host.UI.RawUI.WindowTitle -replace "(.*) \| EXO(.*)","`$1`$2"
                 }
                 if($Disconnect.IsPresent)
                 {
@@ -482,7 +559,7 @@ function Connect-ExchangeService
 
                 if((Test-ClickOnce -ApplicationName "Microsoft Exchange Online Powershell Module" ) -eq $false) 
                 {
-                Install-ClickOnce -Manifest "https://cmdletpswmodule.blob.core.windows.net/exopsmodule/Microsoft.Online.CSE.PSModule.Client.application"
+                    Install-ClickOnce -Manifest "https://cmdletpswmodule.blob.core.windows.net/exopsmodule/Microsoft.Online.CSE.PSModule.Client.application"
                 }
                 #Load the Module
                 $script = Load-ExchangeMFAModule -Verbose
@@ -492,8 +569,8 @@ function Connect-ExchangeService
                 cd $CurDir
                 
                 Connect-EXOPSSession -UserPrincipalName $UserPrincipalName
-            }
-            
+                $Host.UI.RawUI.WindowTitle="$($Host.UI.RawUI.WindowTitle) | EXO" -replace "(.*) \| EXP(?: Sessionprefix: [A-Z]+)?(.*)","`$1`$2"
+            } 
         }
     }
 }
